@@ -6,6 +6,37 @@ use crate::configs::python::PythonConfig;
 use crate::formatter::StringFormatter;
 use crate::formatter::VersionFormatter;
 use crate::utils::get_command_string_output;
+use crate::utils::PathExt;
+
+/// Scans the ancestors of a given path until a directory containing one of the given files or
+/// folders is found.
+pub struct ScanAncestors<'a> {
+    path: &'a Path,
+    files: &'a [&'a str],
+    folders: &'a [&'a str],
+}
+
+impl<'a> ScanAncestors<'a> {
+    /// Scans upwards starting from the initial path until a directory containing one of the given
+    /// files or folders is found.
+    ///
+    /// The scan does not cross device boundaries.
+    pub fn scan(&self) -> Option<&'a Path> {
+        let initial_device_id = self.path.device_id();
+        for dir in self.path.ancestors() {
+            if initial_device_id != dir.device_id() {
+                break;
+            }
+
+            if self.files.iter().any(|name| dir.join(name).is_file())
+                || self.folders.iter().any(|name| dir.join(name).is_dir())
+            {
+                return Some(dir);
+            }
+        }
+        None
+    }
+}
 
 /// Creates a module with the current Python version and, if active, virtual environment.
 pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
@@ -76,19 +107,30 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
 }
 
 fn get_pyenv_version(context: &Context) -> Option<String> {
-    let mut version_name = context.get_env("PYENV_VERSION");
-
-    if version_name.is_none() {
-        version_name = Some(
-            context
-                .exec_cmd("pyenv", &["version-name"])?
-                .stdout
-                .trim()
-                .to_string(),
-        )
+    if let Some(ver) = context.get_env("PYENV_VERSION") {
+        return Some(ver);
     }
 
-    version_name
+    let pwd = context
+        .get_env("PWD")
+        .map_or(context.current_dir.clone(), Into::into);
+    let pyenv_dir = context.get_env("PYENV_DIR").map_or(pwd.clone(), Into::into);
+
+    let scanner = ScanAncestors {
+        path: &pyenv_dir,
+        files: &[".python-version"],
+        folders: &[],
+    };
+
+    let ver = scanner.scan().map_or(String::new(), |path| {
+        std::fs::read_to_string(path.join(".python-version"))
+            .map_or(String::new(), |contents| contents.trim().into())
+    });
+
+    match ver.as_str() {
+        "" => Some(String::from("system")),
+        _ => Some(ver),
+    }
 }
 
 fn get_python_version(context: &Context, config: &PythonConfig) -> Option<String> {
